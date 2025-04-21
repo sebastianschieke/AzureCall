@@ -126,22 +126,25 @@ app.MapPost("/api/callbacks/{contextId}", async (CloudEvent[] cloudEvents, ILogg
             logger.LogInformation($"{parsedEvent?.GetType().Name} parsedEvent received for call connection id: {parsedEvent?.CallConnectionId}");
             var callConnection = callAutomationClient.GetCallConnection(parsedEvent.CallConnectionId);
 
-            if (parsedEvent is CallConnected)
-            {
-                chatHistoryCache[contextId].Add(new SystemChatMessage(Helper.systemPrompt));
+            
+if (parsedEvent is CallConnected)
+{
+    chatHistoryCache[contextId].Add(new SystemChatMessage(Helper.systemPrompt));
 
-                var connectMessage = "Hi, Welcome to Milan Cake shop. Are you calling to place an order for a cake?";
-                chatHistoryCache[contextId].Add(new AssistantChatMessage(connectMessage));
-                await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), connectMessage);
-            }
+    var connectMessage = "Hello, I'm your AI assistant. How can I help you today?";
+    chatHistoryCache[contextId].Add(new AssistantChatMessage(connectMessage));
+    await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), connectMessage);
+}
 
-            if (parsedEvent is RecognizeFailed recognizeFailed && MediaEventReasonCode.RecognizeInitialSilenceTimedOut.Equals(parsedEvent.ResultInformation.SubCode.Value.ToString()))
-            {
-                Console.WriteLine($"Recognize failed: {parsedEvent.ResultInformation}");
-                var noResponse = "I'm sorry, I didn't hear anything. Are you still with me?";
-                await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), noResponse);
-                chatHistoryCache[contextId].Add(new AssistantChatMessage(noResponse));
-            }
+// Replace the RecognizeFailed handling
+
+if (parsedEvent is RecognizeFailed recognizeFailed && MediaEventReasonCode.RecognizeInitialSilenceTimedOut.Equals(parsedEvent.ResultInformation.SubCode.Value.ToString()))
+{
+    Console.WriteLine($"Recognize failed: {parsedEvent.ResultInformation}");
+    var noResponse = "I'm sorry, I didn't hear anything. If you have a question, please feel free to ask.";
+    await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), noResponse);
+    chatHistoryCache[contextId].Add(new AssistantChatMessage(noResponse));
+}
 
             // This event is generated when the speech is recorded by call automation service. In other words, when the user on the other end of the line has completed their sentence
             if (parsedEvent is RecognizeCompleted recogEvent
