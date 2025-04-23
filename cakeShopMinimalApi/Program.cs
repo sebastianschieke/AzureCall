@@ -3,7 +3,8 @@ using Azure.AI.OpenAI.Chat;
 using Azure.Communication;
 using Azure.Communication.CallAutomation;
 using Azure.Messaging;
-using cakeShopMinimalApi;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using Microsoft.AspNetCore.Mvc;
 using OpenAI.Chat;
 using System.Collections.Concurrent;
@@ -17,10 +18,8 @@ using System.Text.RegularExpressions;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
 
 var config = new ConfigurationBuilder()
     .AddUserSecrets<Program>()
@@ -40,6 +39,9 @@ var acsConnectionString = config["ACS_CONNECTION_STRING"] ?? throw new InvalidOp
 var cognitiveServicesEndpoint = config["AZURE_COG_SERVICES_ENDPOINT"] ?? throw new InvalidOperationException("AZURE_COG_SERVICES_ENDPOINT");
 var callbackUriHostString = config["CALLBACK_URI"] ?? throw new InvalidOperationException("CALLBACK_URI is not provided.");
 
+// Add Azure Blob Storage connection string
+var blobStorageConnectionString = config["BLOB_STORAGE_CONNECTION_STRING"] ?? throw new InvalidOperationException("BLOB_STORAGE_CONNECTION_STRING is not provided.");
+
 PhoneNumberIdentifier caller = new(config["ACS_PHONE_NUMBER"] ?? throw new InvalidOperationException("ACS_PHONE_NUMBER is not provided."));
 var speechVoiceName = "en-US-JennyMultilingualV2Neural";
 
@@ -51,7 +53,7 @@ AzureOpenAIClient _aiClient = new AzureOpenAIClient(
 
 ChatClient chatClient = _aiClient.GetChatClient(aiDeploymentName);
 
-// Setting up the AI search index that has the cake shop knowledgebase as options for chat completion API
+// Setting up the AI search index that has the knowledge base for chat completion API
 ChatCompletionOptions options = new();
 options.AddDataSource(new AzureSearchChatDataSource()
 {
@@ -71,11 +73,13 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+// Dictionary to store conversation transcripts
+ConcurrentDictionary<string, StringBuilder> transcriptCache = new();
 ConcurrentDictionary<string, List<ChatMessage>> chatHistoryCache = new();
 var callAutomationClient = new CallAutomationClient(acsConnectionString);
 
 // Sentence end symbols for splitting the response into sentences.
-List<string> sentenceSaperators = new() { ".", "!", "?", ";", "。", "！", "？", "；", "\n" };
+List<string> sentenceSeparators = new() { ".", "!", "?", ";", "。", "！", "？", "；", "\n" };
 
 // Handle incoming call
 app.MapPost("/api/event", async ([FromBody] EventGridEvent[] eventGridEvents) =>
@@ -106,7 +110,15 @@ app.MapPost("/api/event", async ([FromBody] EventGridEvent[] eventGridEvents) =>
                         CallIntelligenceOptions = new CallIntelligenceOptions() { CognitiveServicesEndpoint = new Uri(cognitiveServicesEndpoint) }
                     };
 
+                    // Initialize chat history and transcript cache
                     chatHistoryCache[contextId] = new List<ChatMessage>();
+                    transcriptCache[contextId] = new StringBuilder();
+                    
+                    // Add call start information to transcript
+                    transcriptCache[contextId].AppendLine($"[CALL_START] {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                    transcriptCache[contextId].AppendLine($"[CALL_ID] {contextId}");
+                    transcriptCache[contextId].AppendLine($"[CALLER_NUMBER] {incomingCallEventData.FromCommunicationIdentifier.PhoneNumber.Value}");
+                    
                     AnswerCallResult answerCallResult = await callAutomationClient.AnswerCallAsync(options);
 
                     return Results.Ok();
@@ -127,35 +139,71 @@ app.MapPost("/api/callbacks/{contextId}", async (CloudEvent[] cloudEvents, ILogg
             var callConnection = callAutomationClient.GetCallConnection(parsedEvent.CallConnectionId);
 
             
-if (parsedEvent is CallConnected)
-{
-    chatHistoryCache[contextId].Add(new SystemChatMessage(Helper.systemPrompt));
+            if (parsedEvent is CallConnected)
+            {
+                chatHistoryCache[contextId].Add(new SystemChatMessage(Helper.systemPrompt));
+                
+                // Add system prompt to transcript for reference
+                transcriptCache[contextId].AppendLine($"[SYSTEM_PROMPT]\n{Helper.systemPrompt}");
 
-    var connectMessage = "Hello, I'm your AI assistant. How can I help you today?";
-    chatHistoryCache[contextId].Add(new AssistantChatMessage(connectMessage));
-    await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), connectMessage);
-}
+                // Introduction message from Chloe
+                var connectMessage = "Hello! I'm Chloe, the knowledge transfer assistant working with your company to help prepare training materials for the new receptionist. Thank you so much for taking the time to speak with me today. I'd like to learn from your experience to make sure we capture all the important details that might not be in the official manuals. Is now still a good time to chat?";
+                chatHistoryCache[contextId].Add(new AssistantChatMessage(connectMessage));
+                
+                // Add to transcript
+                transcriptCache[contextId].AppendLine($"[Chloe] {connectMessage}");
+                
+                await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), connectMessage);
+            }
 
-// Replace the RecognizeFailed handling
+            // Handle silence or recognition failure
+            if (parsedEvent is RecognizeFailed recognizeFailed && 
+                recognizeFailed.ResultInformation != null && 
+                recognizeFailed.ResultInformation.SubCode != null && 
+                MediaEventReasonCode.RecognizeInitialSilenceTimedOut.Equals(recognizeFailed.ResultInformation.SubCode.ToString()))
+            {
+                Console.WriteLine($"Recognize failed: {parsedEvent.ResultInformation}");
+                var noResponse = "I'm sorry, I didn't hear anything. If you'd like, we can start by having you describe what a typical day looks like for you as the receptionist, from when you first arrive to when you leave. Or we can focus on any specific area of the role that you think is important for a new person to know.";
+                
+                // Add to transcript
+                transcriptCache[contextId].AppendLine($"[Chloe] {noResponse}");
+                
+                await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), noResponse);
+                chatHistoryCache[contextId].Add(new AssistantChatMessage(noResponse));
+            }
 
-if (parsedEvent is RecognizeFailed recognizeFailed && MediaEventReasonCode.RecognizeInitialSilenceTimedOut.Equals(parsedEvent.ResultInformation.SubCode.Value.ToString()))
-{
-    Console.WriteLine($"Recognize failed: {parsedEvent.ResultInformation}");
-    var noResponse = "I'm sorry, I didn't hear anything. If you have a question, please feel free to ask.";
-    await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), noResponse);
-    chatHistoryCache[contextId].Add(new AssistantChatMessage(noResponse));
-}
-
-            // This event is generated when the speech is recorded by call automation service. In other words, when the user on the other end of the line has completed their sentence
+            // This event is generated when the speech is recorded by call automation service. When the user has completed their sentence
             if (parsedEvent is RecognizeCompleted recogEvent
                 && recogEvent.RecognizeResult is SpeechResult speech_result)
             {
+                 // Add user's speech to transcript
+                 transcriptCache[contextId].AppendLine($"[User] {speech_result.Speech}");
+                 
                  chatHistoryCache[contextId].Add(new UserChatMessage(speech_result.Speech));
-                chatHistoryCache[contextId].Add(new UserChatMessage (Helper.reminderprompt));
+                 chatHistoryCache[contextId].Add(new UserChatMessage(Helper.reminderprompt));
 
+                // If user says goodbye, end the call with a final message
+                if (speech_result.Speech.ToLower().Contains("goodbye") || 
+                    speech_result.Speech.ToLower().Contains("bye") || 
+                    speech_result.Speech.ToLower().Contains("end this call") ||
+                    speech_result.Speech.ToLower().Contains("hang up"))
+                {
+                    var goodbyeMessage = "Thank you so much for sharing your knowledge and experience! This information will be incredibly helpful for the new receptionist. I appreciate your time today. Goodbye!";
+                    
+                    // Add to transcript
+                    transcriptCache[contextId].AppendLine($"[Chloe] {goodbyeMessage}");
+                    
+                    await SayAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), goodbyeMessage);
+                    
+                    // Save the transcript before ending the call
+                    await SaveTranscriptToBlobStorage(contextId, transcriptCache[contextId].ToString());
+                    
+                    // Hang up the call
+                    callConnection.HangUp(true);
+                    return;
+                }
 
-                // calling Azure Open AI to get a response for the user based on the conversation history, knowledgebase and the system prompt
-
+                // Calling Azure Open AI to get a response based on the conversation history, knowledgebase and the system prompt
                 StringBuilder gptBuffer = new();
 
                 await foreach (StreamingChatCompletionUpdate update in chatClient.CompleteChatStreamingAsync(chatHistoryCache[contextId], options))
@@ -169,12 +217,16 @@ if (parsedEvent is RecognizeFailed recognizeFailed && MediaEventReasonCode.Recog
                         }
 
                         gptBuffer.Append(item.Text); 
-                        if (sentenceSaperators.Any(item.Text.Contains))
+                        if (sentenceSeparators.Any(item.Text.Contains))
                         {
                             var sentence = Regex.Replace(gptBuffer.ToString().Trim(), @"\[doc\d+\]", string.Empty);
                             if (!string.IsNullOrEmpty(sentence))
                             {
                                 chatHistoryCache[contextId].Add(new AssistantChatMessage(sentence));
+                                
+                                // Add to transcript
+                                transcriptCache[contextId].AppendLine($"[Chloe] {sentence}");
+                                
                                 await SayAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), sentence);
                                 Console.WriteLine($"\t > streamed: '{sentence}'");
                                 gptBuffer.Clear();
@@ -184,10 +236,20 @@ if (parsedEvent is RecognizeFailed recognizeFailed && MediaEventReasonCode.Recog
                 }
                 await SayAndRecognizeAsync(callConnection.GetCallMedia(), new PhoneNumberIdentifier(callerId), ".");
             }
+            
+            // Handle call disconnected - save transcript
+            if (parsedEvent is CallDisconnected)
+            {
+                logger.LogInformation($"Call disconnected for context ID: {contextId}");
+                
+                // Add call end information to transcript
+                transcriptCache[contextId].AppendLine($"[CALL_END] {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                
+                // Save transcript to Azure Blob Storage
+                await SaveTranscriptToBlobStorage(contextId, transcriptCache[contextId].ToString());
+            }
         }
     });
-
-
 
 app.Run();
 
@@ -216,4 +278,44 @@ async Task SayAndRecognizeAsync(CallMedia callConnectionMedia, PhoneNumberIdenti
     var recognize_result = await callConnectionMedia.StartRecognizingAsync(recognizeOptions);
 }
 
+// Save transcript to Azure Blob Storage
+async Task SaveTranscriptToBlobStorage(string contextId, string transcript)
+{
+    try
+    {
+        // Create BlobServiceClient
+        var blobServiceClient = new BlobServiceClient(blobStorageConnectionString);
+        
+        // Get container and create if it doesn't exist
+        var containerClient = blobServiceClient.GetBlobContainerClient("transcript");
+        await containerClient.CreateIfNotExistsAsync();
+        
+        // Generate unique filename
+        var timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+        var filename = $"{contextId}-{timestamp}.txt";
+        
+        // Get blob client and upload transcript
+        var blobClient = containerClient.GetBlobClient(filename);
+        
+        // Add metadata
+        var metadata = new Dictionary<string, string>
+        {
+            ["callId"] = contextId,
+            ["timestamp"] = DateTime.UtcNow.ToString("o"),
+            ["callType"] = "inbound-sop"
+        };
+        
+        // Upload transcript with metadata
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(transcript));
+        await blobClient.UploadAsync(stream, new BlobUploadOptions { Metadata = metadata });
+        
+        Console.WriteLine($"Transcript saved to blob storage: {filename}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error saving transcript: {ex.Message}");
+    }
+}
 
+// Define the Program class to be used with User Secrets
+public partial class Program { }
