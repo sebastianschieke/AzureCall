@@ -14,7 +14,9 @@ using System.Text;
 using Azure.Messaging.EventGrid.SystemEvents;
 using Azure.Messaging.EventGrid;
 using System.Text.RegularExpressions;
-
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -279,6 +281,7 @@ async Task SayAndRecognizeAsync(CallMedia callConnectionMedia, PhoneNumberIdenti
 }
 
 // Save transcript to Azure Blob Storage
+// Save transcript to Azure Blob Storage as DOCX
 async Task SaveTranscriptToBlobStorage(string contextId, string transcript)
 {
     try
@@ -290,12 +293,70 @@ async Task SaveTranscriptToBlobStorage(string contextId, string transcript)
         var containerClient = blobServiceClient.GetBlobContainerClient("transcript");
         await containerClient.CreateIfNotExistsAsync();
         
-        // Generate unique filename
+        // Generate unique filename (now with .docx extension)
         var timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
-        var filename = $"{contextId}-{timestamp}.txt";
+        var filename = $"{contextId}-{timestamp}.docx";
         
-        // Get blob client and upload transcript
+        // Get blob client
         var blobClient = containerClient.GetBlobClient(filename);
+        
+        // Create DOCX document in memory
+        using var memoryStream = new MemoryStream();
+        
+        // Create the document
+        using (WordprocessingDocument document = WordprocessingDocument.Create(memoryStream, WordprocessingDocumentType.Document))
+        {
+            // Add a main document part
+            MainDocumentPart mainPart = document.AddMainDocumentPart();
+            
+            // Create the document structure
+            mainPart.Document = new Document();
+            Body body = new Body();
+            mainPart.Document.Append(body);
+            
+            // Split transcript by lines and add each line as a paragraph
+            string[] lines = transcript.Split('\n');
+            foreach (string line in lines)
+            {
+                var para = new Paragraph();
+                var run = new Run();
+                var text = new Text(line) { Space = SpaceProcessingModeValues.Preserve };
+                
+                // Format specific lines (optional)
+                if (line.StartsWith("[CALL_START]") || 
+                    line.StartsWith("[CALL_ID]") || 
+                    line.StartsWith("[CALLER_NUMBER]") ||
+                    line.StartsWith("[CALL_END]"))
+                {
+                    // Make metadata bold
+                    run.RunProperties = new RunProperties(new Bold());
+                }
+                else if (line.StartsWith("[Chloe]"))
+                {
+                    // Style for assistant's messages
+                    run.RunProperties = new RunProperties(
+                        new Color { Val = "0000FF" }  // Blue color
+                    );
+                }
+                else if (line.StartsWith("[User]"))
+                {
+                    // Style for user's messages
+                    run.RunProperties = new RunProperties(
+                        new Color { Val = "006400" }  // Dark green color
+                    );
+                }
+                
+                run.Append(text);
+                para.Append(run);
+                body.Append(para);
+            }
+            
+            // Save the document
+            document.Save();
+        }
+        
+        // Reset the memory stream position
+        memoryStream.Position = 0;
         
         // Add metadata
         var metadata = new Dictionary<string, string>
@@ -305,17 +366,15 @@ async Task SaveTranscriptToBlobStorage(string contextId, string transcript)
             ["callType"] = "inbound-sop"
         };
         
-        // Upload transcript with metadata
-        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(transcript));
-        await blobClient.UploadAsync(stream, new BlobUploadOptions { Metadata = metadata });
+        // Upload document with metadata
+        await blobClient.UploadAsync(memoryStream, new BlobUploadOptions { Metadata = metadata });
         
-        Console.WriteLine($"Transcript saved to blob storage: {filename}");
+        Console.WriteLine($"Transcript saved to blob storage as DOCX: {filename}");
     }
     catch (Exception ex)
     {
         Console.WriteLine($"Error saving transcript: {ex.Message}");
     }
 }
-
 // Define the Program class to be used with User Secrets
 public partial class Program { }
