@@ -44,7 +44,7 @@ var blobStorageConnectionString = config["BLOB_STORAGE_CONNECTION_STRING"] ?? th
 
 PhoneNumberIdentifier caller = new(config["ACS_PHONE_NUMBER"] ?? throw new InvalidOperationException("ACS_PHONE_NUMBER is not provided."));
 // Changed voice to German female voice
-var speechVoiceName = "de-DE-KatjaNeural";
+var speechVoiceName = "de-DE-ConradNeural";
 
 // Get Azure Open AI chat client
 AzureOpenAIClient _aiClient = new AzureOpenAIClient(
