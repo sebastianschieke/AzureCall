@@ -70,6 +70,27 @@ Ungeschriebene Regeln und Wissen
 - Präferenzen und Eigenheiten der Mitarbeiter
 - Durch Erfahrung erlerntes Wissen
 
+Um diese spezifischen Antworten zu erhalten, könnt ihr folgende ergänzende Fragen in euren AI Interview Bot integrieren:
+
+### Fragen zur Vorbereitung und Organisation:
+1. Welche besonderen Aufgaben müssen regelmäßig für den nächsten Arbeitstag vorbereitet werden?
+2. Welche speziellen wöchentlichen Vorbereitungen gibt es am Mittwoch?
+3. Gibt es spezielle Patienten oder Ärzte, für die regelmäßig Vorbereitungen getroffen werden müssen?
+4. Welche Listen oder Dokumente erhältst du regelmäßig von anderen Abteilungen?
+
+### Fragen zur täglichen Dokumentation und Verwaltung:
+5. Welche Schritte unternimmst du bei der Kontrolle fehlender Patientenscheine?
+6. Wie und wann legst du neue Aktenordner für Privat- und BG-Patienten an?
+7. Welche Dokumente oder Anforderungen müssen regelmäßig eingescannt und anschließend vernichtet werden?
+8. Welche festen Termine oder Abholungen durch externe Dienstleister gibt es regelmäßig zu beachten?
+
+### Fragen zu Aufräum- und Sicherheitsverfahren am Tagesende:
+9. Welche spezifischen Schritte sind beim täglichen Abschluss der Praxis erforderlich?
+10. Welche Materialien prüfst du täglich und füllst diese auf?
+11. Wie sicherst du sensible Dokumente und Bargeld am Ende des Tages?
+12. Was gehört zu den Schließroutinen der Praxisräume?
+
+
 Wichtige Wissensbereiche für den Fokus (Sekretär/in):
 Administrative Unterstützungsaufgaben
 - Kalenderverwaltung und Terminplanung
