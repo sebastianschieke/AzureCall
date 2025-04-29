@@ -1,4 +1,4 @@
-using Azure.AI.OpenAI;
+﻿using Azure.AI.OpenAI;
 using Azure.AI.OpenAI.Chat;
 using Azure.Communication;
 using Azure.Communication.CallAutomation;
@@ -44,7 +44,7 @@ var blobStorageConnectionString = config["BLOB_STORAGE_CONNECTION_STRING"] ?? th
 
 PhoneNumberIdentifier caller = new(config["ACS_PHONE_NUMBER"] ?? throw new InvalidOperationException("ACS_PHONE_NUMBER is not provided."));
 // Changed voice to German female voice
-var speechVoiceName = "de-DE-ConradNeural";
+var speechVoiceName = "de-DE-KatjaNeural";
 
 // Get Azure Open AI chat client
 AzureOpenAIClient _aiClient = new AzureOpenAIClient(
@@ -332,30 +332,40 @@ app.MapPost("/api/callbacks/{contextId}", async (CloudEvent[] cloudEvents, ILogg
                     StringBuilder fullGptResponse = new(); // To store the full response for chat history
                     logger.LogInformation("Starting OpenAI call");
                     await foreach (StreamingChatCompletionUpdate update in chatClient.CompleteChatStreamingAsync(chatHistoryCache[contextId], options))
-                    {
-                        var message = update.ContentUpdate;
-                        foreach (var item in message)
-                        {
-                            if (string.IsNullOrEmpty(item.Text))
-                            {
-                                continue;
-                            }
-                            gptBuffer.Append(item.Text);
-                            fullGptResponse.Append(item.Text);
-                            if (sentenceSeparators.Any(item.Text.Contains))
-                            {
-                                var sentence = Regex.Replace(gptBuffer.ToString().Trim(), @"\[doc\d+\]", string.Empty);
-                                if (!string.IsNullOrEmpty(sentence))
-                                {
-                                    // Add assistant's spoken sentence to transcript
-                                    transcriptCache[contextId].AppendLine($"[Sophia] {sentence}");
-                                    await SayAsync(callConnection.GetCallMedia(), phoneId, sentence);
-                                    logger.LogInformation($"Streamed: '{sentence}'");
-                                    gptBuffer.Clear();
-                                }
-                            }
-                        }
-                    }
+{
+    var message = update.ContentUpdate;
+    foreach (var item in message)
+    {
+        if (string.IsNullOrEmpty(item.Text))
+        {
+            continue;
+        }
+        gptBuffer.Append(item.Text);
+        fullGptResponse.Append(item.Text);
+        if (sentenceSeparators.Any(item.Text.Contains))
+        {
+            var sentence = Regex.Replace(gptBuffer.ToString().Trim(), @"\[doc\d+\]", string.Empty);
+            if (!string.IsNullOrEmpty(sentence))
+            {
+                // Add assistant's spoken sentence to transcript
+                transcriptCache[contextId].AppendLine($"[Sophia] {sentence}");
+                
+                // Use this approach with direct error handling
+                try {
+                    var responseTextSource = CreateTextSource(sentence);
+                    await callConnection.GetCallMedia().PlayToAllAsync(new PlayToAllOptions([responseTextSource]));
+                    logger.LogInformation($"Streamed: '{sentence}'");
+                }
+                catch (Exception ex) {
+                    logger.LogError($"Error playing audio: {ex.Message}");
+                    // If there's an error, just continue without stopping the whole process
+                }
+                
+                gptBuffer.Clear();
+            }
+        }
+    }
+}
                     // Handle any remaining text in the buffer
                     if (gptBuffer.Length > 0)
                     {
@@ -408,30 +418,95 @@ app.MapPost("/api/callbacks/{contextId}", async (CloudEvent[] cloudEvents, ILogg
 
 app.Run();
 
-TextSource CreateTextSource(string response) => new TextSource(response) { VoiceName = speechVoiceName };
+TextSource CreateTextSource(string response) 
+{
+    // Simple text source with voice name
+    return new TextSource(response) { VoiceName = speechVoiceName };
+}
+
+
+
 
 // Convert the message to speech and play on the connected call
 async Task SayAsync(CallMedia callConnectionMedia, PhoneNumberIdentifier phoneId, string response)
 {
-    var responseTextSource = CreateTextSource(response);
-    var recognize_result = await callConnectionMedia.PlayToAllAsync(new PlayToAllOptions([responseTextSource]));
+    try
+    {
+        // Use basic text source without SSML
+        var responseTextSource = CreateTextSource(response);
+        
+        // Play the audio with error handling
+        await callConnectionMedia.PlayToAllAsync(new PlayToAllOptions([responseTextSource]));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error in SayAsync: {ex.Message}");
+        
+        // Try a fallback method with shorter text if the first attempt fails
+        try
+        {
+            if (response.Length > 100)
+            {
+                // If response is long, try with just the first part
+                string shorterResponse = response.Substring(0, Math.Min(100, response.Length));
+                var fallbackSource = new TextSource(shorterResponse) { VoiceName = speechVoiceName };
+                await callConnectionMedia.PlayToAllAsync(new PlayToAllOptions([fallbackSource]));
+            }
+        }
+        catch (Exception fallbackEx)
+        {
+            Console.WriteLine($"Fallback also failed: {fallbackEx.Message}");
+        }
+    }
 }
 
 // Modified to include configurable timeout
 async Task SayAndRecognizeAsync(CallMedia callConnectionMedia, PhoneNumberIdentifier phoneId, string response, int timeoutMs = 500)
 {
-    var responseTextSource = CreateTextSource(response);
+    try
+    {
+        // Use a basic text source without SSML for recognition
+        var textSource = CreateTextSource(response);
 
-    var recognizeOptions =
-        new CallMediaRecognizeSpeechOptions(
-            targetParticipant: CommunicationIdentifier.FromRawId(phoneId.RawId))
+        var recognizeOptions =
+            new CallMediaRecognizeSpeechOptions(
+                targetParticipant: CommunicationIdentifier.FromRawId(phoneId.RawId))
+            {
+                Prompt = textSource,
+                EndSilenceTimeout = TimeSpan.FromMilliseconds(timeoutMs),
+                InitialSilenceTimeout = TimeSpan.FromSeconds(10)
+            };
+
+        await callConnectionMedia.StartRecognizingAsync(recognizeOptions);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error in SayAndRecognizeAsync: {ex.Message}");
+        
+        // Try to speak without recognition if recognition fails
+        try
         {
-            Prompt = responseTextSource,
-            EndSilenceTimeout = TimeSpan.FromMilliseconds(timeoutMs), // Configurable timeout
-            InitialSilenceTimeout = TimeSpan.FromSeconds(10) // 10 seconds for initial silence
-        };
-
-    var recognize_result = await callConnectionMedia.StartRecognizingAsync(recognizeOptions);
+            var textSource = CreateTextSource(response);
+            await callConnectionMedia.PlayToAllAsync(new PlayToAllOptions([textSource]));
+            
+            // Start recognition separately
+            await Task.Delay(500);
+            
+            var recognizeOptions =
+                new CallMediaRecognizeSpeechOptions(
+                    targetParticipant: CommunicationIdentifier.FromRawId(phoneId.RawId))
+                {
+                    EndSilenceTimeout = TimeSpan.FromMilliseconds(timeoutMs),
+                    InitialSilenceTimeout = TimeSpan.FromSeconds(10)
+                };
+                
+            await callConnectionMedia.StartRecognizingAsync(recognizeOptions);
+        }
+        catch (Exception fallbackEx)
+        {
+            Console.WriteLine($"Fallback also failed: {fallbackEx.Message}");
+        }
+    }
 }
 
 // Save transcript to Azure Blob Storage
@@ -485,6 +560,7 @@ bool IsConsentGiven(string response)
            lowerResponse.Contains("ich stimme zu") ||
            lowerResponse.Contains("einverstanden") ||
            lowerResponse.Contains("können sie") ||
+           lowerResponse.Contains("yes") ||
            lowerResponse.Contains("klar");
 }
 
@@ -495,6 +571,7 @@ bool IsConsentDeclined(string response)
            lowerResponse.Contains("nicht") ||
            lowerResponse.Contains("keine") ||
            lowerResponse.Contains("kein") ||
+           lowerResponse.Contains("no") ||
            lowerResponse.Contains("ablehnen") ||
            lowerResponse.Contains("nicht einverstanden") ||
            lowerResponse.Contains("verweigere") ||
